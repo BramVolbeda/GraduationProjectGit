@@ -1,6 +1,9 @@
 # TODO implement the PINN3.0 Code
 import torch
-print('test complete')
+import torch.optim as optim
+import torch.profiler
+import torch.utils.data
+from scripts.file_readers import file_reader
 
 ### naming conventions 
 # Function - my_function
@@ -18,7 +21,14 @@ print('test complete')
 # - Put the """ that ends a multiline docstring on a line by itself
 # Use .startswith() and .endswith() instead of slicing
 
+file = './data/2DSTEN/2DSTEN_mesh.vtu'
+file_bc = './data/2DSTEN/2DSTEN_bnc.vtk'
 
+x, y, z, _  = file_reader(file, mesh=True)
+xb, yb, zb, _ = file_reader(file_bc, mesh=False)
+
+
+print('jobs done')
 
 
 
