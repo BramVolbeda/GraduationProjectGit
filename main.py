@@ -24,8 +24,8 @@ from scripts.file_readers import file_reader
 file = './data/2DSTEN/2DSTEN_mesh.vtu'
 file_bc = './data/2DSTEN/2DSTEN_bnc.vtk'
 
-x, y, z, _  = file_reader(file, mesh=True)
-xb, yb, zb, _ = file_reader(file_bc, mesh=False)
+location_vector, _  = file_reader(file, mesh=True)
+location_vector_bnc, _ = file_reader(file_bc, mesh=False)
 
 
 print('jobs done')
