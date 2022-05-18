@@ -3,20 +3,24 @@ import vtk
 from vtkmodules.util.numpy_support import vtk_to_numpy
 import os
 
-def file_reader(file, mesh):
+def file_reader(file, mesh, **extremes):
     """
-    Function that takes in a *.vtk/*.vtu file and extracts the coordinates.
+    Function that takes in a *.vtk/*.vtu file and extracts the coordinates. 
+    Outputs minima and maxima for equal scaling between data files.  
     
     Parameters:
     file (*.vtk/*.vtu) : The file containing either the mesh or the boundary coordinates. 
     mesh (Boolean) : If the file is of type .*vtu (mesh) or *.vtk (boundary). 
+    **extremes (kwargs) : Minima and maxima lists from previous function call. Defined as min and max. 
 
     Returns: 
     vector_norm (list) : Coordinates normalized between [-1, 1], for x (index 0), y (index 1) and z (index 2). 
-
+    minima (list) : Minumum values for x (index 0), y (index 1) and z (index 2). 
+    maxima (list) : Maximum values for x (index 0), y (index 1) and z (index 2). 
     """
     print('Loading', file)  # TODO f string format 
-    reader = vtk.vtkXMLUnstructuredGridReader() if mesh else vtk.vtkUnstructuredGridReader() # Set up the reader type 
+    # reader = vtk.vtkXMLUnstructuredGridReader() if mesh else vtk.vtkUnstructuredGridReader() # Set up the reader type 
+    reader = vtk.vtkXMLUnstructuredGridReader() if mesh else vtk.vtkPolyDataReader() # Set up the reader type 
     # elif input_n == 3:
     #     reader = vtk.vtkPolyDataReader()
     reader.SetFileName(file) 
@@ -33,9 +37,9 @@ def file_reader(file, mesh):
 
     for i in range(n_points):   # Read the contents of the file
         pt_iso = data_vtk.GetPoint(i)
-        x_vtk_mesh[i] = pt_iso[0] 
-        y_vtk_mesh[i] = pt_iso[1] 
-        z_vtk_mesh[i] = pt_iso[2]
+        x_vtk_mesh[i] = '%.4f'%(pt_iso[0])  # Expressed in 4 decimals, avoid close to 0 truncation errors
+        y_vtk_mesh[i] = '%.4f'%(pt_iso[1])
+        z_vtk_mesh[i] = '%.4f'%(pt_iso[2])
         VTKpoints.InsertPoint(i, pt_iso[0], pt_iso[1], pt_iso[2]) 
 
     point_data = vtk.vtkUnstructuredGrid() 
@@ -52,19 +56,23 @@ def file_reader(file, mesh):
     stds = [vector.std() for vector in lv_transpose]
     vector_norm_mean = [(vector - mean) / std for vector, mean, std in zip(lv_transpose, means, stds)]
     # append Z-dimension if lost earlier
-    vector_norm_mean.append(np.zeros((len(vector_norm_range[0]), 1))) if not np.any(z_vtk_mesh) else vector_norm_mean
+    vector_norm_mean.append(np.zeros((len(vector_norm_mean[0]), 1))) if not np.any(z_vtk_mesh) else vector_norm_mean
     
-    # Applying [-1, 1] normalization to the input data
-    minima = [vector.min() for vector in lv_transpose]
-    maxima = [vector.max() for vector in lv_transpose]
+     # Applying [-1, 1] normalization to the input data
+    if len(extremes) != 0: 
+        minima = extremes['min']
+        maxima = extremes['max']
+    else: 
+        minima = [vector.min() for vector in lv_transpose]
+        maxima = [vector.max() for vector in lv_transpose]
     vector_norm_range = [2.* (vector - minimum) / (maximum - minimum) -1 for vector, minimum, maximum in zip(lv_transpose, minima, maxima)]
     # append Z-dimension if lost earlier 
     vector_norm_range.append(np.zeros((len(vector_norm_range[0]), 1))) if not np.any(z_vtk_mesh) else vector_norm_range
 
-    return vector_norm_range, data_vtk
+    return vector_norm_range, minima, maxima
 
 
-def data_reader(case, random_flag=False):
+def data_reader(case, random_flag=False, **extremes):
     """
     Function that takes in the solution file (*.vtu) and extracts the velocity values at prespecified
     or random locations. 
@@ -75,6 +83,7 @@ def data_reader(case, random_flag=False):
     random_flag (Boolean) : If set to True, the user is required to specify the amount of data points that will
                             be randomly sampled within the domain. If set to False, the pre-specified points will
                             be used as described in the case information. 
+    **extremes (kwargs) : Minima and maxima lists from previous function call. Defined as min and max. 
 
     Returns: 
     solution_locations (list) : List of lists corresponding to the coordinates of the data points. 
@@ -91,6 +100,7 @@ def data_reader(case, random_flag=False):
     print('Loading', case.vel_file) 
 
     reader = vtk.vtkXMLUnstructuredGridReader()  # Set up reader
+    # reader = vtk.vtkUnstructuredGridReader()  # Set up reader
     reader.SetFileName(case.vel_file)
     reader.Update()
     data_vtk = reader.GetOutput()
@@ -115,22 +125,13 @@ def data_reader(case, random_flag=False):
                 y_vtk_mesh[N_pts_data] = pt_iso[1]
                 z_vtk_mesh[N_pts_data] = pt_iso[2]
                 N_pts_data += 1
-
         print('n_points sampled', N_pts_data)
-        # x_data = np.zeros((N_pts_data, 1))
-        # y_data = np.zeros((N_pts_data, 1))
-        # z_data = np.zeros((N_pts_data, 1))
-
         data_locations = [mesh[0:N_pts_data, 0] for mesh in location_vector]
-
-        # x_data = x_vtk_mesh[0:N_pts_data, 0]
-        # y_data = y_vtk_mesh[0:N_pts_data, 0]
-        # z_data = z_vtk_mesh[0:N_pts_data, 0]
 
 
     VTKpoints = vtk.vtkPoints()
-    for i in range(len(x_data)):
-        VTKpoints.InsertPoint(i, x_data[i], y_data[i], z_data[i]) 
+    for i in range(len(data_locations[0])): 
+        VTKpoints.InsertPoint(i, [axis[i] for axis in data_locations]) 
 
     point_data = vtk.vtkUnstructuredGrid()
     point_data.SetPoints(VTKpoints)
@@ -142,23 +143,30 @@ def data_reader(case, random_flag=False):
     array = probe.GetOutput().GetPointData().GetArray(case.fieldname) 
     data_vel = vtk_to_numpy(array) 
 
-    data_vel_u = data_vel[:, 0]
-    data_vel_v = data_vel[:, 1]
-    data_vel_w = data_vel[:, 2]
-    
-    x_data = x_data / case.X_scale
-    y_data = y_data / case.Y_scale
-    z_data = z_data / case.Z_scale
-    ud = data_vel_u / case.U_scale
-    vd = data_vel_v / case.U_scale
-    wd = data_vel_w / case.U_scale
-    
-    
-    xd = x_data.reshape(-1, 1)  # need to reshape to get 2D array # worden 5 losse lijsten
-    yd = y_data.reshape(-1, 1)  # [[0.15],[0.07], etc.
-    zd = z_data.reshape(-1, 1)
-    ud = ud.reshape(-1, 1)  # need to reshape to get 2D array
-    vd = vd.reshape(-1, 1)  # need to reshape to get 2D array
-    wd = wd.reshape(-1, 1)
+    solution_values = [data_vel[:,i] for i in range(len(data_locations))] 
 
-    return xd, yd, zd, ud, vd, wd
+    # Setting up the location vector, division error if Z only contains zeros
+    sv = data_locations[0:-1] if not np.any(z_data) else data_locations
+    sv_reshape = [vector.reshape((np.size(vector[:]), 1)) for vector in sv]
+    sv_transpose = [vector.reshape(-1, 1) for vector in sv_reshape]
+
+    # Applying [-1, 1] normalization to the input data  TODO min en max vanuit mesh, niet datapunten
+    if len(extremes) != 0: 
+        minima = extremes['min']
+        maxima = extremes['max']
+    else: 
+        minima = [vector.min() for vector in sv_transpose]
+        maxima = [vector.max() for vector in sv_transpose]
+
+    solution_locations = [2.* (vector - minimum) / (maximum - minimum) -1 for vector, minimum, maximum in zip(sv_transpose, minima, maxima)]
+    # append Z-dimension if lost earlier 
+    solution_locations.append(np.zeros((len(solution_locations[0]), 1))) if not np.any(z_data) else solution_locations
+
+    
+    # ud = data_vel_u / case.U_scale  # TODO how to scale U? 
+    # vd = data_vel_v / case.U_scale
+    # wd = data_vel_w / case.U_scale
+    
+    solution_values = [velocity / case.U_scale for velocity in solution_values]
+
+    return solution_locations, solution_values
