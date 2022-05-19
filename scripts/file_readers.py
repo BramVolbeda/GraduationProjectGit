@@ -66,8 +66,8 @@ def file_reader(file, mesh, **extremes):
         minima = [vector.min() for vector in lv_transpose]
         maxima = [vector.max() for vector in lv_transpose]
     vector_norm_range = [2.* (vector - minimum) / (maximum - minimum) -1 for vector, minimum, maximum in zip(lv_transpose, minima, maxima)]
-    # append Z-dimension if lost earlier 
-    vector_norm_range.append(np.zeros((len(vector_norm_range[0]), 1))) if not np.any(z_vtk_mesh) else vector_norm_range
+    # append Z-dimension if lost earlier # TODO: is dit wel nodig? 
+    # vector_norm_range.append(np.zeros((len(vector_norm_range[0]), 1))) if not np.any(z_vtk_mesh) else vector_norm_range
 
     return vector_norm_range, minima, maxima
 
@@ -143,12 +143,11 @@ def data_reader(case, random_flag=False, **extremes):
     array = probe.GetOutput().GetPointData().GetArray(case.fieldname) 
     data_vel = vtk_to_numpy(array) 
 
-    solution_values = [data_vel[:,i] for i in range(len(data_locations))] 
-
     # Setting up the location vector, division error if Z only contains zeros
     sv = data_locations[0:-1] if not np.any(z_data) else data_locations
     sv_reshape = [vector.reshape((np.size(vector[:]), 1)) for vector in sv]
     sv_transpose = [vector.reshape(-1, 1) for vector in sv_reshape]
+    solution_values = [data_vel[:,i] for i in range(len(sv))] 
 
     # Applying [-1, 1] normalization to the input data  TODO min en max vanuit mesh, niet datapunten
     if len(extremes) != 0: 
@@ -160,7 +159,7 @@ def data_reader(case, random_flag=False, **extremes):
 
     solution_locations = [2.* (vector - minimum) / (maximum - minimum) -1 for vector, minimum, maximum in zip(sv_transpose, minima, maxima)]
     # append Z-dimension if lost earlier 
-    solution_locations.append(np.zeros((len(solution_locations[0]), 1))) if not np.any(z_data) else solution_locations
+    # solution_locations.append(np.zeros((len(solution_locations[0]), 1))) if not np.any(z_data) else solution_locations
 
     
     # ud = data_vel_u / case.U_scale  # TODO how to scale U? 

@@ -10,13 +10,13 @@ import tkinter as tk
 from tkinter import filedialog
 import time
 import numpy as np
-
+from torch.utils.data import DataLoader, TensorDataset
 
 
 from scripts.file_readers import data_reader, file_reader
 from scripts import case_info
 from scripts.figure_creation import Figures
-
+from scripts.network_builder import Net, init_normal
 
 ### naming conventions 
 # Function - my_function
@@ -36,8 +36,6 @@ from scripts.figure_creation import Figures
 
 ex = Experiment()
 
-
-
 # Configuration of the case data, reading of the data files, hyperparameter set up
 
 @ex.config
@@ -50,20 +48,21 @@ def config():
         print('__CUDA Device Name:', torch.cuda.get_device_name(0))
         print('__CUDA Device Total Memory [GB]:', torch.cuda.get_device_properties(0).total_memory / 1e9)
     else:
-        sys.exit('unable to mount to CUDA, please retry. fMake sure CUDA is installed') 
+        sys.exit('unable to mount to CUDA, please retry. Make sure CUDA is installed') 
 
 
     case = case_info.stenose2D()
     ex_ID = '003'
     output_filename = "./results/" + case.name + "/outputs/" + case.ID + "PINNoutput_" + ex_ID + ".vtk"
     DEBUG = True
-
+    hidden_layers = 5
+    neurons = 128
     
     geometry_locations, minima, maxima  = file_reader(case.mesh_file, mesh=True)
     boundary_locations, _, _ = file_reader(case.bc_file, mesh=False, min=minima, max=maxima)
     solution_locations, solution_values = data_reader(case, min=minima, max=maxima)
-
-
+    
+    # Plot to check the scaling of the geometry and data points
     Figures.scaled_geometry(Figures, boundary_locations, solution_locations, solution_values, show=False)
 
     # if not DEBUG:
@@ -90,123 +89,103 @@ def config():
 @ex.main
 def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_locations, boundary_locations, solution_locations,
  solution_values, batchsize, nr_losses, learning_rate, Flag_notrain, Flag_pretrain,
-              step_epoch, decay_rate, ex_ID, output_filename, epoch_pretrain, alpha, Flag_lossTerm):
+              step_epoch, decay_rate, ex_ID, output_filename, epoch_pretrain, alpha, Flag_lossTerm, hidden_layers, neurons):
     
-    # # Build the NNs
-    # net2_u = Net3(case.input_n, case.h_n).to(device)
-    # net2_v = Net3(case.input_n, case.h_n).to(device)
-    # net2_p = Net3(case.input_n, case.h_n).to(device) 
-    # net2_w = Net3(case.input_n, case.h_n).to(device)
+    # Build the NNs
+    net_u = Net(case.input_n, hidden_layers, neurons).to(device)
+    net_v = Net(case.input_n, hidden_layers, neurons).to(device)
+    net_p = Net(case.input_n, hidden_layers, neurons).to(device) 
+    net_w = Net(case.input_n, hidden_layers, neurons).to(device)
 
-    # # Reading the pretrained networks if specified 
-    # if Flag_notrain or Flag_pretrain:
-    #     print('Reading (pretrain) functions first...')
-    #     root = tk.Tk()
-    #     root.withdraw()
+    networks = [net_u, net_v, net_p, net_w] 
+    
+    # Reading the pretrained networks if specified 
+    if Flag_notrain or Flag_pretrain:
+        print('Reading (pretrain) functions first...')
+        root = tk.Tk()
+        root.withdraw()
 
-    #     print('Please specify the NN file (.pt) for the velocity u')
-    #     file_path_u = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-    #     # file_path_u = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_u.pt'
-    #     print('Please specify the NN file (.pt) for the velocity v')
-    #     file_path_v = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-    #     # file_path_v = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_v.pt'
-    #     print('Please specify the NN file (.pt) for the velocity p')
-    #     file_path_p = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-    #     # file_path_p = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_p.pt'
+        print('Please specify the NN file (.pt) for the velocity u')
+        file_path_u = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+        # file_path_u = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_u.pt'
+        print('Please specify the NN file (.pt) for the velocity v')
+        file_path_v = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+        # file_path_v = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_v.pt'
+        print('Please specify the NN file (.pt) for the velocity p')
+        file_path_p = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+        # file_path_p = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_p.pt'
 
-    #     if case.input_n == 3:
-    #         print('Please specify the NN file (.pt) for the velocity w')
-    #         file_path_w = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-    #         net2_w.load_state_dict(torch.load(file_path_w))
-    #     # root.destroy()
+        if case.input_n == 3:
+            print('Please specify the NN file (.pt) for the velocity w')
+            file_path_w = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+            net_w.load_state_dict(torch.load(file_path_w))
+        # root.destroy()
 
-    #     net2_u.load_state_dict(torch.load(file_path_u))
-    #     net2_v.load_state_dict(torch.load(file_path_v))
-    #     net2_p.load_state_dict(torch.load(file_path_p))
+        net_u.load_state_dict(torch.load(file_path_u))
+        net_v.load_state_dict(torch.load(file_path_v))
+        net_p.load_state_dict(torch.load(file_path_p))
 
-    # if Flag_notrain:
-    #     post(case, epochs, net2_u, net2_v, net2_w, net2_p, output_filename, ex_ID, plot_vecfield=False, plot_streamline=False)
+    if Flag_notrain:
+        post(case, epochs, net_u, net_v, net_w, net_p, output_filename, ex_ID, plot_vecfield=False, plot_streamline=False)
 
-    #     # calculating gradients wrt losses, plotting for each layer
-    #     # TODO : Zorgen dat dit weer werkt voor de no_train flag
-    #     # epoch = 0
-    #     # anneal_weight = []
-    #     # GradLosses(case, device, ex_ID, epoch, epoch_pretrain, x, y, z, xb, yb, zb, xd, yd, zd, ud, vd, wd, net2_u,
-    #     #            net2_v, net2_w, net2_p, nr_losses, alpha, anneal_weight, Flag_grad=True, Flag_notrain=True)
+        # calculating gradients wrt losses, plotting for each layer
+        # TODO : Zorgen dat dit weer werkt voor de no_train flag
+        # epoch = 0
+        # anneal_weight = []
+        # GradLosses(case, device, ex_ID, epoch, epoch_pretrain, x, y, z, xb, yb, zb, xd, yd, zd, ud, vd, wd, net_u,
+        #            net_v, net_w, net_p, nr_losses, alpha, anneal_weight, Flag_grad=True, Flag_notrain=True)
 
-    #     sys.exit('postprocessing executed')
-    # print('device used is', device)
+        sys.exit('postprocessing executed')
+    print('device used is', device)
 
-
-
-    # x = torch.Tensor(x).to(device)
-    # y = torch.Tensor(y).to(device)
-    # z = torch.Tensor(z).to(device)
-    # x_plot = torch.clone(x)
-    # y_plot = torch.clone(y)
-    # z_plot = torch.clone(z)
-    # xb = torch.Tensor(xb).to(device)
-    # yb = torch.Tensor(yb).to(device)
-    # zb = torch.Tensor(zb).to(device)
-    # xb_plot = torch.clone(xb)
-    # yb_plot = torch.clone(yb)
-    # zb_plot = torch.clone(zb)
-    # xd = torch.Tensor(xd).to(device)
-    # yd = torch.Tensor(yd).to(device)
-    # zd = torch.Tensor(zd).to(device)
-    # xd_plot = torch.clone(xd)
-    # yd_plot = torch.clone(yd)
-    # zd_plot = torch.clone(zd)
-    # ud = torch.Tensor(ud).to(device)
-    # vd = torch.Tensor(vd).to(device)
-    # wd = torch.Tensor(wd).to(device)
-    # ud_plot = torch.clone(ud)
-    # vd_plot = torch.clone(vd)
-    # wd_plot = torch.clone(wd)
     # if case.input_n == 3:  # TODO data size afhankelijk maken?
     #     x_plot = x_plot[::4]
     #     y_plot = y_plot[::4]
     #     z_plot = z_plot[::4]
 
-    # Build arrays as Tensors and move to device 
-    x, y, z = [torch.Tensor(geometry_locations[axis]).to(device) for axis in range(len(geometry_locations))]
-    xb, yb, zb = [torch.Tensor(boundary_locations[axis]).to(device) for axis in range(len(boundary_locations))]
-    xd, yd, zd = [torch.Tensor(solution_locations[axis]).to(device) for axis in range(len(solution_locations))]
-    ud, vd, wd = [torch.Tensor(solution_values[axis]).to(device) for axis in range(len(solution_values))]
+    # Build arrays as Tensors and move to device, require_grad = True 
+    geometry_locations = [torch.Tensor(geometry_locations[axis]).to(device) for axis in range(len(geometry_locations))]
+    x, y, *z = [axis.requires_grad_() for axis in geometry_locations]
+    # x_copy, y_copy, z_copy = [torch.Tensor(geometry_locations[axis]).to(device) for axis in range(len(geometry_locations))]
+    
+    boundary_locations = [torch.Tensor(boundary_locations[axis]).to(device) for axis in range(len(boundary_locations))]
+    xb, yb, *zb = [axis.requires_grad_() for axis in boundary_locations]
+    # xb_copy, yb_copy, zb_copy = [torch.Tensor(boundary_locations[axis]).to(device) for axis in range(len(boundary_locations))]
+    
+    solution_locations = [torch.Tensor(solution_locations[axis]).to(device) for axis in range(len(solution_locations))]
+    xd, yd, *zd = [axis.requires_grad_() for axis in solution_locations]
+    # xd_copy, yd_copy, zd_copy = [torch.Tensor(solution_locations[axis]).to(device) for axis in range(len(solution_locations))]
+
+    solution_values = [torch.Tensor(solution_values[axis]).to(device) for axis in range(len(solution_values))]
+    ud, vd, *wd = [axis.requires_grad_() for axis in solution_values]
+    # ud_copy, vd_copy, wd_copy = [torch.Tensor(solution_values[axis]).to(device) for axis in range(len(solution_values))]
 
 
-
-    dataset = TensorDataset(x, y, z)
+    dataset = TensorDataset(x, y, *z) 
     dataloader = DataLoader(dataset, batch_size=batchsize, shuffle=True, num_workers=0, drop_last=True)
 
     loss_list = [[] for _ in range(nr_losses)]
     anneal_weight = [[1.] for _ in range(nr_losses-1)]
-    anneal_weight2 = [[1.] for _ in range(nr_losses - 1)]
     NSgrads_list = []
     NSterms_list = []
    
     tic = time.time()
 
     if not Flag_pretrain:
-        net2_u.apply(init_normal)  # TODO init Xavier?
-        net2_v.apply(init_normal)
-        net2_w.apply(init_normal)
-        net2_p.apply(init_normal)
+        net_u.apply(init_normal)  # TODO init Xavier?
+        net_v.apply(init_normal)
+        net_w.apply(init_normal)
+        net_p.apply(init_normal)
 
-    optimizer_u = optim.Adam(net2_u.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-    optimizer_v = optim.Adam(net2_v.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-    optimizer_w = optim.Adam(net2_w.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-    optimizer_p = optim.Adam(net2_p.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+    optimizer_u = optim.Adam(net_u.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+    optimizer_v = optim.Adam(net_v.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+    optimizer_w = optim.Adam(net_w.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+    optimizer_p = optim.Adam(net_p.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
 
     scheduler_u = torch.optim.lr_scheduler.StepLR(optimizer_u, step_size=step_epoch, gamma=decay_rate)
     scheduler_v = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
-    if case.input_n == 3:
-        scheduler_w = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
+    scheduler_w = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
     scheduler_p = torch.optim.lr_scheduler.StepLR(optimizer_p, step_size=step_epoch, gamma=decay_rate)
-
-    # scheduler_u = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_u, factor=0.5, verbose=True)
-    # scheduler_v = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_v, factor=0.5, verbose=True)
-    # scheduler_p = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p, factor=0.5, verbose=True)
 
     # with torch.profiler.profile(
     #         schedule=torch.profiler.schedule(wait=1, warmup=0, active=2, repeat=2),
@@ -229,22 +208,34 @@ def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_loc
         loss_bc_tot = 0.
         loss_data_tot = 0.
         n = 0
-        for batch_idx, (x_in, y_in, z_in) in enumerate(dataloader):  # standaard is 3D, maar als Z=0 heeft dat geen
-            # invloed op loss functies
-            # prof.step()
-            net2_u.zero_grad()
-            net2_v.zero_grad()
-            net2_w.zero_grad()
-            net2_p.zero_grad()
-            loss_eqn, grads, loss_terms = criterion2(x_in, y_in, z_in, net2_u, net2_v, net2_w, net2_p, case.X_scale, case.Y_scale,
+        for batch_idx, (x_in, y_in, *z_in) in enumerate(dataloader):  
+
+            # networks = [network.zero_grad() for network in networks]
+            net_u.zero_grad()
+            net_v.zero_grad()
+            net_w.zero_grad()
+            net_p.zero_grad()
+
+            batch_locations = [x_in, y_in, z_in] if z_in else [x_in, y_in]  # Differentiate between 2D and 3D 
+            input_network_geo = torch.cat(([axis for axis in batch_locations]), 1)
+            input_network_bnc = torch.cat(([axis for axis in boundary_locations]), 1)
+            input_network_data = torch.cat(([axis for axis in solution_locations]), 1)
+            
+
+
+            predictions_geo = [network(input_network_geo) for network in networks]
+            predictions_bnc = [network(input_network_bnc) for network in networks]
+            predictions_data = [network(input_network_data) for network in networks]
+
+            loss_eqn, grads, loss_terms = criterion(x_in, y_in, z_in, net_u, net_v, net_w, net_p, case.X_scale, case.Y_scale,
                                  case.Z_scale, case.U_scale, case.Diff, case.rho, case.input_n) # TODO verschillende criterions
-            loss_bc = Loss_BC(xb, yb, zb, net2_u, net2_v, net2_w, case.input_n)
-            loss_data = Loss_data(xd, yd, zd, ud, vd, wd, net2_u, net2_v, net2_w, case.input_n)
+            loss_bc = Loss_BC(xb, yb, zb, net_u, net_v, net_w, case.input_n)
+            loss_data = Loss_data(xd, yd, zd, ud, vd, wd, net_u, net_v, net_w, case.input_n)
 
             if epoch % 10 == 0 and len(anneal_weight[0]) == epoch/10:
                 anneal_weight, Lambda_BC, Lambda_data = GradLosses(case, device, ex_ID, epoch, epoch_pretrain,
                                                                     x_in, y_in, z_in, xb, yb, zb, xd, yd, zd, ud, vd, wd,
-                                                                    net2_u, net2_v, net2_w, net2_p, alpha,
+                                                                    net_u, net_v, net_w, net_p, alpha,
                                                                     anneal_weight, Flag_grad, Lambda_BC, Lambda_data,
                                                                              Flag_notrain=False)
 
@@ -306,11 +297,11 @@ def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_loc
                     # TODO kan 3D nog toevoegn, let er wel op dat bovenstaande volgorde niet voor 3D geldt
 
         if epoch % epoch_save_NN == 0:  # save network and loss plot
-            torch.save(net2_u.state_dict(), case.path + "/NNfiles/" + case.ID + "data_u_" + ex_ID + ".pt")
-            torch.save(net2_v.state_dict(), case.path + "/NNfiles/" + case.ID + "data_v_" + ex_ID + ".pt")
-            torch.save(net2_p.state_dict(), case.path + "/NNfiles/" + case.ID + "data_p_" + ex_ID + ".pt")
+            torch.save(net_u.state_dict(), case.path + "/NNfiles/" + case.ID + "data_u_" + ex_ID + ".pt")
+            torch.save(net_v.state_dict(), case.path + "/NNfiles/" + case.ID + "data_v_" + ex_ID + ".pt")
+            torch.save(net_p.state_dict(), case.path + "/NNfiles/" + case.ID + "data_p_" + ex_ID + ".pt")
             if case.input_n == 3:
-                torch.save(net2_w.state_dict(), case.path + "/NNfiles/" + case.ID + "data_w_" + ex_ID + ".pt")
+                torch.save(net_w.state_dict(), case.path + "/NNfiles/" + case.ID + "data_w_" + ex_ID + ".pt")
             print('NN saved')
 
             # steps = np.linspace(0, epochs - epoch_save_loss, np.int(np.divide(epochs, epoch_save_loss)))
@@ -334,22 +325,22 @@ def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_loc
                                1) if case.input_n == 3 else \
                 torch.cat((x_plot.requires_grad_(), y_plot.requires_grad_()), 1)
             # net_in = torch.cat((x.requires_grad_(), y.requires_grad_()), 1)
-            output_u = net2_u(net_in)  # evaluate model
-            output_v = net2_v(net_in)  # evaluate model
+            output_u = net_u(net_in)  # evaluate model
+            output_v = net_v(net_in)  # evaluate model
             output_u = output_u.cpu().data.numpy()  # need to convert to cpu before converting to numpy
             output_v = output_v.cpu().data.numpy()
 
             net_in_data = torch.cat((xd.requires_grad_(), yd.requires_grad_(), zd.requires_grad_()), 1) \
                 if case.input_n ==3 else torch.cat((xd.requires_grad_(), yd.requires_grad_()), 1)
-            output_ud = net2_u(net_in_data)
-            output_vd = net2_v(net_in_data)
+            output_ud = net_u(net_in_data)
+            output_vd = net_v(net_in_data)
             output_ud = output_ud.cpu().data.numpy()  # need to convert to cpu before converting to numpy
             output_vd = output_vd.cpu().data.numpy()
 
             if case.input_n == 3:
-                output_w = net2_w(net_in)
+                output_w = net_w(net_in)
                 output_w = output_w.cpu().data.numpy()
-                output_wd = net2_w(net_in_data)
+                output_wd = net_w(net_in_data)
                 output_wd = output_wd.cpu().data.numpy()
 
             x_plot2 = x_plot.cpu()
@@ -433,11 +424,11 @@ def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_loc
     elapseTime = toc - tic
     print("elapse time in parallel = ", elapseTime)
 
-    torch.save(net2_u.state_dict(), case.path + "/NNfiles/" + case.ID + "data_u_" + ex_ID + ".pt")
-    torch.save(net2_v.state_dict(), case.path + "/NNfiles/" + case.ID + "data_v_" + ex_ID + ".pt")
-    torch.save(net2_p.state_dict(), case.path + "/NNfiles/" + case.ID + "data_p_" + ex_ID + ".pt")
+    torch.save(net_u.state_dict(), case.path + "/NNfiles/" + case.ID + "data_u_" + ex_ID + ".pt")
+    torch.save(net_v.state_dict(), case.path + "/NNfiles/" + case.ID + "data_v_" + ex_ID + ".pt")
+    torch.save(net_p.state_dict(), case.path + "/NNfiles/" + case.ID + "data_p_" + ex_ID + ".pt")
     if case.input_n == 3:
-        torch.save(net2_w.state_dict(), case.path + "/NNfiles/" + case.ID + "data_w_" + ex_ID + ".pt")
+        torch.save(net_w.state_dict(), case.path + "/NNfiles/" + case.ID + "data_w_" + ex_ID + ".pt")
 
     print("Data saved!")
 
@@ -601,7 +592,7 @@ def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_loc
     # plt.show()
 
     epochs += epoch_pretrain
-    post(case, epochs, net2_u, net2_v, net2_w, net2_p, output_filename, ex_ID, plot_vecfield=False, plot_streamline=False,
+    post(case, epochs, net_u, net_v, net_w, net_p, output_filename, ex_ID, plot_vecfield=False, plot_streamline=False,
          writeVTK=True)
 
     print('jobs done!')

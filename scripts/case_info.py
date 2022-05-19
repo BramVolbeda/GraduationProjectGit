@@ -7,7 +7,7 @@ class stenose2D:
 
         self.name = "stenose2D"
         self.input_n = 2
-        self.h_n = 128
+        # self.h_n = 10 # 128
         self.path = "./results/" + self.name  # where results are saved
         self.directory = "./data/2DSTEN/"
         self.mesh_file = self.directory + "2DSTEN_mesh.vtu"
