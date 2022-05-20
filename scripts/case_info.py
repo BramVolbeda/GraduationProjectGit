@@ -6,7 +6,7 @@ class stenose2D:
         self.inplace = inplace
 
         self.name = "stenose2D"
-        self.input_n = 2
+        self.input_dimension = 2
         # self.h_n = 10 # 128
         self.path = "./results/" + self.name  # where results are saved
         self.directory = "./data/2DSTEN/"
@@ -19,13 +19,14 @@ class stenose2D:
         self.Y_scale = 0.5
         self.Z_scale = 1.0  # 2D, but for generalizing script still needed
         self.U_scale = 10.
+        self.Reynolds = 150. 
         self.Diff = 0.001
         self.rho = 1.
         self.Lambda_div = 1.  # penalty factor for continuity eqn (Makes it worse!?)
         self.Lambda_v = 1.  # penalty factor for y-momentum equation
         self.fieldname = 'velocity'  # The velocity field name in the vtk file (see from ParaView)
-        self.Lambda_BC = 16
-        self.Lambda_data = 1
+        self.lambda_bc = 16
+        self.lambda_data = 1
         #self.ml_name = '2Dstenosis.h5'
         #self.output_filename = self.path + "outputs/" + self.pretrain + "Own_test2.vtk"
         self.x_data = [1., 1.2, 1.22, 1.31, 1.39]
