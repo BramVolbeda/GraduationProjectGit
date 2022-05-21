@@ -75,6 +75,7 @@ class Figures:
 
         u, v, *w = [solution.cpu().data.numpy() for solution in prediction_values]
         ud, vd, *wd = solution_values
+        print(ud.size())
 
         xb, yb, *zb = [axis.cpu().detach().numpy() for axis in boundary_locations]
         xd, yd, *zd = [axis.cpu().detach().numpy() for axis in solution_locations]

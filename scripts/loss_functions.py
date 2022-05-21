@@ -61,6 +61,8 @@ def loss_geo(case, predictions, batch_locations):
         loss_2 = u * v_x + v * v_y - 1/case.Reynolds * (v_xx + v_yy) + p_y  # Y-dir
         loss_3 = (u_x + v_y)  # continuity
 
+
+    print(loss_1.size(), loss_2.size(), loss_3.size())
     # Mean Squared Error Loss
     loss_f = nn.MSELoss()
 
@@ -89,6 +91,7 @@ def loss_bnc(case, predictions):
 
     # Mean Squard Error Loss
     loss_f = nn.MSELoss()
+    print(u.size(), v.size(), w.size())
 
     loss_bnc = (
         loss_f(u, torch.zeros_like(u))
@@ -113,8 +116,10 @@ def loss_data(case, predictions, solution):
     loss_data (float) : Value for the data loss.
     """
     u, v, w, _ = predictions
+    solution = [axis[:, None] for axis in solution]  
     ud, vd, *wd = solution
 
+    print(u.size(), v.size(), w.size(), ud.size(), vd.size())
     # Mean Squared Error Loss
     loss_f = nn.MSELoss()
 
