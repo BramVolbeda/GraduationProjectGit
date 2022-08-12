@@ -73,3 +73,4 @@ def weight_annealing_algorithm(networks, loss_eqn, loss_bnc, loss_data, lambda_b
     weight_factor_list[1].append(lambda_data)  
 
     return weight_factor_list, lambda_bc, lambda_data
+

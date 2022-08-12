@@ -12,17 +12,18 @@ import time
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 import sys
-
+from sacred.observers import MongoObserver
 import os 
 path = os.getcwd()
 print(path)
 
-from own_scripts import case_info
-from own_scripts.file_readers import data_reader, file_reader
-from own_scripts.figure_creation import Figures
-from own_scripts.network_builder import Net, init_normal
-from own_scripts.loss_functions import loss_geo, loss_bnc, loss_data
-from own_scripts.weight_annealing import weight_annealing_algorithm
+from scripts import case_info
+from scripts.file_readers import data_reader, file_reader, file_reader_v2, data_reader_v2, create_dir
+from scripts.figure_creation import Figures
+from scripts.network_builder import Net, init_normal, Net2, Net2P, Net3
+from scripts.loss_functions import loss_geo, loss_bnc, loss_data, loss_geo_v2, loss_geo_v3, loss_wss, evo
+from scripts.weight_annealing import weight_annealing_algorithm
+from scripts.post_processing import post_run, write_loss_vtk, write_loss_vtk2, post_experiment
 
 ### naming conventions 
 # Function - my_function
@@ -43,6 +44,12 @@ from own_scripts.weight_annealing import weight_annealing_algorithm
 ex = Experiment()
 
 # Configuration of the case data, reading of the data files, hyperparameter set up
+case = case_info.stenose2D()
+DEBUG = True
+if not DEBUG: 
+    ex.observers.append(MongoObserver(url='mongodb+srv://dbBram:t42F7C828K!!@experiments.aakys.mongodb.net'
+                                              '/test_stenose?ssl=true&ssl_cert_reqs=CERT_NONE',
+                                          db_name=case.ID))
 
 @ex.config
 def config():
@@ -56,35 +63,30 @@ def config():
     else:
         sys.exit('unable to mount to CUDA, please retry. Make sure CUDA is installed') 
 
-
     case = case_info.stenose2D_Arzani()
-    ex_ID = '002'
-    output_filename = "./results/" + case.name + "/outputs/" + case.ID + "PINNoutput_" + ex_ID + ".vtk"
+
+    ex_ID = '009'
     DEBUG = True
     hidden_layers = 5
     neurons = 128
+    nr_data_points = 5  # amount of data points if flag_lhs or flag_random is set to True in the file_readers
+    nr_runs = 1  # divides the collocation points with replacement
     
-    geometry_locations, minima, maxima  = file_reader(case.mesh_file, mesh=True)
-    boundary_locations, _, _ = file_reader(case.bc_file, mesh=False, min=minima, max=maxima)
-    solution_locations, solution_values = data_reader(case, min=minima, max=maxima)
-    
-    # Plot to check the scaling of the geometry and data points
-    Figures.scaled_geometry(Figures, case, ex_ID, boundary_locations, solution_locations, solution_values)
-
     # if not DEBUG:
     #     AppendObserver(case, ex)
 
-
-    Flag_pretrain = False  # Whether you want to load a pretrained network and train further
-    Flag_notrain = False  # Whether you want to load a pretrained network and look at postprocessing
-    Flag_lossTerm = True
+    flag_pretrain = False  # Whether you want to load a pretrained network and train further
+    flag_notrain = True  # Whether you want to load a pretrained network and look at postprocessing
+    flag_compare = False  # if flag_notrain = True, setting this one to true allows for the comparison between 2 runs
+    flag_bagging = False  # Currently nothing
+    
     epochs = 5500
-    epoch_pretrain = 0 if not Flag_pretrain else 5500  # epochs after reading a pretrained network
+    epoch_pretrain = 0 if not flag_pretrain else 5500  # epochs after reading a pretrained network
     epoch_save_loss = 2  # determines how often the loss values are saved
-    epoch_save_NN = 100  # determines how often the NN is updated -- 'fail-save' mechanism should training stop before
+    epoch_save_NN = 5  # determines how often the NN is updated -- 'fail-save' mechanism should training stop before
     epoch_learning_weight = 10
     # final epoch
-    remark = "First Arzani run with the PINN3.0 framework"  # note for future reference
+    remark = "2DTUBE frequent logging MSE loss"  # note for future reference
 
     learning_rate = 5e-4  # starting learning rate
     step_epoch = 1200  # after how many iterations the learning rate should be adapted
@@ -94,34 +96,54 @@ def config():
     nr_losses = 3
 
 @ex.main
-def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_locations, boundary_locations, solution_locations,
- solution_values, batchsize, nr_losses, learning_rate, Flag_notrain, Flag_pretrain,
-              step_epoch, decay_rate, ex_ID, output_filename, epoch_pretrain, alpha, Flag_lossTerm, hidden_layers, neurons, 
-              epoch_learning_weight):
+def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, batchsize, nr_losses, learning_rate, flag_notrain, 
+                flag_pretrain, flag_compare, flag_bagging, step_epoch, decay_rate, ex_ID, epoch_pretrain, alpha, 
+                hidden_layers, neurons, epoch_learning_weight, nr_data_points, nr_runs):
     
+    # if flag_notrain:  # Stelt in staat meerdere runs te vergelijken 
+    #     device = ('cpu')
+    #     seed = 0  # TODO optional maken 
+    #     post_experiment(case, hidden_layers, neurons, device, seed, nr_runs)
+        
+    if flag_notrain: 
+        device = 'cpu'
+
     # Build the NNs
-    net_u = Net(case.input_dimension, hidden_layers, neurons).to(device)
-    net_v = Net(case.input_dimension, hidden_layers, neurons).to(device)
-    net_p = Net(case.input_dimension, hidden_layers, neurons).to(device) 
-    net_w = Net(case.input_dimension, hidden_layers, neurons).to(device)
+    # net_u = Net(case.input_dimension, hidden_layers, neurons).to(device)
+    # net_v = Net(case.input_dimension, hidden_layers, neurons).to(device)
+    # net_p = Net(case.input_dimension, hidden_layers, neurons).to(device) 
+    # net_w = Net(case.input_dimension, hidden_layers, neurons).to(device)
+
+    net_u = Net2(2, 128).to(device)
+    net_v = Net2(2, 128).to(device)
+    net_p = Net2(2, 128).to(device) 
+    net_w = Net2(2, 128).to(device)
 
     networks = [net_u, net_v, net_w, net_p] 
     
+    if flag_compare:
+        net_u2 = Net(2, hidden_layers, neurons).to(device)
+        net_v2 = Net(2, hidden_layers, neurons).to(device)
+        net_p2 = Net(2, hidden_layers, neurons).to(device) 
+        net_w2 = Net(2, hidden_layers, neurons).to(device)
+
+        networks = [net_u, net_v, net_w, net_p, net_u2, net_v2, net_w2, net_p2]
+            
     # Reading the pretrained networks if specified 
-    if Flag_notrain or Flag_pretrain:
+    if flag_notrain or flag_pretrain:
         print('Reading (pretrain) functions first...')
         root = tk.Tk()
         root.withdraw()
 
         print('Please specify the NN file (.pt) for the velocity u')
         file_path_u = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-        # file_path_u = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_u.pt'
+        #file_path_u = 'D:/Graduation_project/code_v2/results/stenose2DA/NNfiles/STEN2DA_data_u_002.pt'
         print('Please specify the NN file (.pt) for the velocity v')
         file_path_v = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-        # file_path_v = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_v.pt'
+        #file_path_v = 'D:/Graduation_project/code_v2/results/stenose2DA/NNfiles/STEN2DA_data_v_002.pt'
         print('Please specify the NN file (.pt) for the velocity p')
         file_path_p = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
-        # file_path_p = 'D:/Graduation_project/AA_files/2DSTEN/004/DataReader_adapted/STEN2DTB_data_p.pt'
+        #file_path_p = 'D:/Graduation_project/code_v2/results/stenose2DA/NNfiles/STEN2DA_data_p_002.pt'
 
         if case.input_dimension == 3:
             print('Please specify the NN file (.pt) for the velocity w')
@@ -133,336 +155,306 @@ def geo_train(device, case, epochs, epoch_save_loss, epoch_save_NN, geometry_loc
         net_v.load_state_dict(torch.load(file_path_v))
         net_p.load_state_dict(torch.load(file_path_p))
 
-    # if Flag_notrain:
-    #     post(case, epochs, net_u, net_v, net_w, net_p, output_filename, ex_ID, plot_vecfield=False, plot_streamline=False)
+        if flag_compare:
+            print('Please specify the NN file (.pt) for the velocity u2')
+            file_path_u2 = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+            print('Please specify the NN file (.pt) for the velocity v2')
+            file_path_v2 = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+            print('Please specify the NN file (.pt) for the velocity p2')
+            file_path_p2 = filedialog.askopenfilename(filetypes=(("NN files", "*.pt"), ("all files", "*.*")))
+            
+            net_u2.load_state_dict(torch.load(file_path_u2))
+            net_v2.load_state_dict(torch.load(file_path_v2))
+            net_p2.load_state_dict(torch.load(file_path_p2)) 
 
         # calculating gradients wrt losses, plotting for each layer
         # TODO : Zorgen dat dit weer werkt voor de no_train flag
         # epoch = 0
         # loss_weight_list = []
         # GradLosses(case, device, ex_ID, epoch, epoch_pretrain, x, y, z, xb, yb, zb, xd, yd, zd, ud, vd, wd, net_u,
-        #            net_v, net_w, net_p, nr_losses, alpha, loss_weight_list, Flag_grad=True, Flag_notrain=True)
+        #            net_v, net_w, net_p, nr_losses, alpha, loss_weight_list, flag_grad=True, flag_notrain=True)
 
-        # sys.exit('postprocessing executed')
-    print('device used is', device)
-
-    # if case.input_dimension == 3:  # TODO data size afhankelijk maken?
-    #     x_plot = x_plot[::4]
-    #     y_plot = y_plot[::4]
-    #     z_plot = z_plot[::4]
-
-    # Build arrays as Tensors and move to device, require_grad = True 
-    x_plot, y_plot, *z_plot = [torch.Tensor(geometry_locations[axis]).to(device) for axis in range(len(geometry_locations))]
-    geometry_locations = [torch.Tensor(geometry_locations[axis]).to(device) for axis in range(len(geometry_locations))]
-    x, y, *z = [axis.requires_grad_() for axis in geometry_locations]
-    
-    xb_plot, yb_plot, *zb_plot = [torch.Tensor(boundary_locations[axis]).to(device) for axis in range(len(boundary_locations))]
-    boundary_locations = [torch.Tensor(boundary_locations[axis]).to(device) for axis in range(len(boundary_locations))]
-    # xb, yb, *zb = [axis.requires_grad_() for axis in boundary_locations]
-    
-    xd_plot, yd_plot, *zd_plot = [torch.Tensor(solution_locations[axis]).to(device) for axis in range(len(solution_locations))]
-    solution_locations = [torch.Tensor(solution_locations[axis]).to(device) for axis in range(len(solution_locations))]
-    # xd, yd, *zd = [axis.requires_grad_() for axis in solution_locations]
-    
-    ud_plot, vd_plot, *wd_plot = [torch.Tensor(solution_values[axis]).to(device) for axis in range(len(solution_values))]
-    solution_values = [torch.Tensor(solution_values[axis]).to(device) for axis in range(len(solution_values))]
-    # ud, vd, *wd = [axis.requires_grad_() for axis in solution_values]
-    
-    if not z:  # Freeze network if 2D for reduced computation time 
-        for param in net_w.parameters():
-            param.requires_grad = False  
-
-    dataset = TensorDataset(x, y, *z) 
-    dataloader = DataLoader(dataset, batch_size=batchsize, shuffle=True, num_workers=0, drop_last=True)
-
-    nr_layers = hidden_layers + 3
-    loss_list = [[] for _ in range(nr_losses)]
-    loss_weight_list = [[1.] for _ in range(nr_losses-1)]
-    NSgrads_list = []
-    NSterms_list = []
-   
-    tic = time.time()
-
-    if not Flag_pretrain:
-        net_u.apply(init_normal)  # TODO init Xavier?
-        net_v.apply(init_normal)
-        net_w.apply(init_normal)
-        net_p.apply(init_normal)
-
-    # Optimizer determines algorithm used to calculate update of NN parameters. 
-    optimizer_u = optim.Adam(net_u.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-    optimizer_v = optim.Adam(net_v.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-    optimizer_w = optim.Adam(net_w.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-    optimizer_p = optim.Adam(net_p.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
-
-    # Scheduler determines the algorithm to update the learning rate during training. 
-    scheduler_u = torch.optim.lr_scheduler.StepLR(optimizer_u, step_size=step_epoch, gamma=decay_rate)
-    scheduler_v = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
-    scheduler_w = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
-    scheduler_p = torch.optim.lr_scheduler.StepLR(optimizer_p, step_size=step_epoch, gamma=decay_rate)
-
-    grad_list = [0, 10, 20, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000, 5000]  # Epochs calculation gradient distributions
-    lambda_bc = case.lambda_bc
-    lambda_data = case.lambda_data
-    for epoch in range(epochs):  # TODO epoch + epoch_pretrain
-        flag_grad_plot = False
-        # flag_grad_plot = True if epoch in grad_list else flag_grad_plot
+        # sys.exit('postprocessing executed'
         
-        eqn_loss_tot = 0.
-        bnc_loss_tot = 0.
-        data_loss_tot = 0.
-        n = 0
+    for run in range(1, nr_runs + 1): 
         
-        for batch_idx, (x_in, y_in, *z_in) in enumerate(dataloader):  
-            # networks = [network.zero_grad() for network in networks]
-            net_u.zero_grad()
-            net_v.zero_grad()
-            net_w.zero_grad()
-            net_p.zero_grad()
+        create_dir(case, run)
+        seed = run
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        geometry_locations, means_geo, stds_geo  = file_reader_v2(case.mesh_file, seed, nr_runs, mesh=True, flag_lhs=False)
+        # Take half the points for 3D 
+        #geometry_locations = [geometry_locations[axis][::20] for axis in range(len(geometry_locations))]
 
-            batch_locations = [x_in, y_in, z_in] if z_in else [x_in, y_in]  # Differentiate between 2D and 3D 
+        boundary_locations, means_bnc, stds_bnc = file_reader_v2(case.bc_file, seed, nr_runs, mesh=False, flag_lhs=False)
+        solution_locations, solution_values = data_reader_v2(case, geometry_locations, nr_data_points, seed,\
+                                                                flag_random=False, flag_exact=False, flag_lhs=False)
+
+        # Figures.scaled_geometry(Figures, case, ex_ID, boundary_locations, geometry_locations, geometry_locations, run, show=True)
+
+        # Build arrays as Tensors and move to device, require_grad = True 
+        geometry_locations = [torch.Tensor(geometry_locations[axis]).to(device) for axis in range(len(geometry_locations))]
+        x, y, *z = [axis.requires_grad_() for axis in geometry_locations]  # TODO uitzoeken hoe zelfde vorm als x en y 
+         # Plot to check the scaling of the geometry and data points
+        Figures.scaled_geometry(Figures, case, ex_ID, boundary_locations, solution_locations, solution_values, run, show=False)
+        if z: 
+            Figures.scatter3D_data(Figures, case, solution_locations, solution_values, show=False)                                                                    #te krijgen terwijl optioneel te houden
+        
+        boundary_locations = [torch.Tensor(boundary_locations[axis]).to(device) for axis in range(len(boundary_locations))]
+        solution_locations = [torch.Tensor(solution_locations[axis]).to(device) for axis in range(len(solution_locations))]
+        solution_values = [torch.Tensor(solution_values[axis]).to(device) for axis in range(len(solution_values))]
+
+        if flag_notrain:
+            post_run(case, ex_ID, geometry_locations, networks, means_geo, stds_geo, epoch_pretrain, run, flag_compare)
+            sys.exit('postprocessing executed')
+
+        if not z:  # Freeze network if 2D for reduced computation time 
+            print('Freezing training of NN_W - No Z axis detected')
+            for param in net_w.parameters():
+                param.requires_grad = False  
+            dataset = TensorDataset(x, y)
+        else: 
+            z = z[0]
+            dataset = TensorDataset(x, y, z)
             
-            # Create input data: Coordinates within domain (geo), at boundary (bnc) and sensor points (data)
-            input_dimensionetwork_geo = torch.cat(([axis for axis in batch_locations]), 1)
-            input_dimensionetwork_bnc = torch.cat(([axis for axis in boundary_locations]), 1)
-            input_dimensionetwork_data = torch.cat(([axis for axis in solution_locations]), 1)
+        #dataset = TensorDataset(x, y, z) if z_ else TensorDataset(x, y)
+        dataloader = DataLoader(dataset, batch_size=batchsize, shuffle=True, num_workers=0, drop_last=True)
 
-            # Current predictions of the PINN for velocity and pressure
-            predictions_geo = [network(input_dimensionetwork_geo).view(len(input_dimensionetwork_geo), -1) for network in networks]   
-            predictions_bnc = [network(input_dimensionetwork_bnc).view(len(input_dimensionetwork_bnc), -1) for network in networks]  
-            predictions_data = [network(input_dimensionetwork_data).view(len(input_dimensionetwork_data), -1) for network in networks]  
+        nr_layers = hidden_layers + 2  # TODO: +3 ? 
+        loss_list = [[] for _ in range(nr_losses)]
+        loss_weight_list = [[1.] for _ in range(nr_losses-1)]
+        ns_grads_list = []
+        ns_values_list = []
+    
+        tic = time.time()
 
-            eqn_loss, grads = loss_geo(case, predictions_geo, batch_locations)  # Compare prediction to Navier-Stokes eq. TODO: grads houden?
-            bnc_loss = loss_bnc(case, predictions_bnc)  # Compare prediction to no-slip condition
-            data_loss = loss_data(case, predictions_data, solution_values)  # Compare prediction to data solution
+        if not flag_pretrain:
+            net_u.apply(init_normal)  # TODO init Xavier?
+            net_v.apply(init_normal)
+            net_w.apply(init_normal)
+            net_p.apply(init_normal)
 
-            if epoch % epoch_learning_weight == 0 and len(loss_weight_list[0]) == epoch/epoch_learning_weight:
-                loss_weight_list, lambda_bc, lambda_data, *gradients = weight_annealing_algorithm(networks, eqn_loss, bnc_loss, 
-                                                                                data_loss, lambda_bc, lambda_data, 
-                                                                                loss_weight_list, nr_layers, alpha, flag_grad_plot)
-                if flag_grad_plot: 
-                    Figures.gradient_distribution(Figures, case, gradients, epoch+epoch_pretrain, ex_ID, nr_layers)
+        # Optimizer determines algorithm used to calculate update of NN parameters. 
+        optimizer_u = optim.Adam(net_u.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+        optimizer_v = optim.Adam(net_v.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+        optimizer_w = optim.Adam(net_w.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
+        optimizer_p = optim.Adam(net_p.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=10 ** -15)
 
-            loss = eqn_loss + lambda_bc * bnc_loss + lambda_data * data_loss
-            eqn_loss_tot += eqn_loss.detach() 
-            bnc_loss_tot += bnc_loss.detach()  # Detach to prevent storage of computation graph which leads to Out of Memory error.     
-            data_loss_tot += data_loss.detach()
-            n += 1
+        # Scheduler determines the algorithm to update the learning rate during training.
+        # scheduler_u = torch.optim.lr_scheduler.MultiStepLR(optimizer_u, milestones=[1200, 2400, 3600, 4800], gamma = decay_rate) 
+        # scheduler_v = torch.optim.lr_scheduler.MultiStepLR(optimizer_v, milestones=[1200, 2400, 3600, 4800], gamma = decay_rate) 
+        # scheduler_w = torch.optim.lr_scheduler.MultiStepLR(optimizer_w, milestones=[1200, 2400, 3600, 4800], gamma = decay_rate) 
+        # scheduler_p = torch.optim.lr_scheduler.MultiStepLR(optimizer_p, milestones=[1200, 2400, 3600, 4800], gamma = decay_rate) 
+        scheduler_u = torch.optim.lr_scheduler.StepLR(optimizer_u, step_size=step_epoch, gamma=decay_rate)
+        scheduler_v = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
+        scheduler_w = torch.optim.lr_scheduler.StepLR(optimizer_v, step_size=step_epoch, gamma=decay_rate)
+        scheduler_p = torch.optim.lr_scheduler.StepLR(optimizer_p, step_size=step_epoch, gamma=decay_rate)
 
-            # Optimizer to determine direction of weight and bias update 
-            loss.backward()  # Compute the gradients 
-            optimizer_u.step()  # Update parameters 
-            optimizer_v.step()
-            optimizer_p.step()
+        grad_list = [0, 10, 20, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000, 5000]  # Epochs calculation gradient distributions
+        vtk_list = [0, 5, 10, 25, 50, 100, 200, 300, 400, 500, 1000, 1500, 2000, 3000, 4000, 5000]
+        
+        batch_evo_0 = [1, 2, 3, 4, 5, 10, 25, 50, 75]
+        batch_evo = [20, 40, 60]
+        
+        lambda_bc = case.lambda_bc
+        lambda_data = case.lambda_data
+
+        # batch_retain = [torch.tensor([0, 0])]
+        for epoch in range(epoch_pretrain, epochs):  # TODO epoch + epoch_pretrain
+            flag_grad_plot = False
+            flag_grad_plot = True if epoch in grad_list else flag_grad_plot
+            
+            eqn_loss_tot = 0.
+            bnc_loss_tot = 0.
+            data_loss_tot = 0.
+            n = 0
+            
+            batch_len = []
+            # if epoch in vtk_list: 
+            #     write_loss_vtk2(case, geometry_locations, networks, means_geo, stds_geo, epoch, ex_ID, run)
+
+            for batch_idx, batch_locations in enumerate(dataloader):  
+                
+                # if batch_idx != 0: 
+
+                # #     # plt.figure()  # Check which points are being replaced
+                # #     # xplot = batch_locations[0][0:len(batch_retain[0]), :].cpu().detach().numpy()
+                # #     # yplot = batch_locations[1][0:len(batch_retain[0]), :].cpu().detach().numpy()
+                # #     # plt.scatter(xplot, yplot)
+                # #     # plt.show()
+                    
+                #     batch_locations[0][0:len(batch_retain[0]), :] = batch_retain[0]
+                #     batch_locations[1][0:len(batch_retain[0]), :] = batch_retain[1]
+                #     batch_len.append(len(batch_retain[0]))
+
+                net_u.zero_grad()
+                net_v.zero_grad()
+                net_w.zero_grad()
+                net_p.zero_grad()
+
+                # Create input data: Coordinates within domain (geo), at boundary (bnc) and sensor points (data)
+                input_network_geo = torch.cat(([axis for axis in batch_locations]), 1)
+                input_network_bnc = torch.cat(([axis for axis in boundary_locations]), 1)
+                input_network_data = torch.cat(([axis for axis in solution_locations]), 1)
+
+                # Current predictions of the PINN for velocity and pressure
+                predictions_geo = [network(input_network_geo).view(len(input_network_geo), -1) for network in networks]   
+                predictions_bnc = [network(input_network_bnc).view(len(input_network_bnc), -1) for network in networks]  
+                predictions_data = [network(input_network_data).view(len(input_network_data), -1) for network in networks]  
+
+                # eqn_loss, grads, ns_values_epoch = loss_geo_v2(case, predictions_geo, batch_locations, means_geo, stds_geo, flag_values=True)  # Compare prediction to Navier-Stokes eq. TODO: grads houden?
+                eqn_loss, grads, ns_values_epoch, total_loss, loss_x, loss_y, loss_c = loss_geo_v2(case, predictions_geo, batch_locations, \
+                                                            means_geo, stds_geo, flag_values=True) 
+                                                             # Compare prediction to Navier-Stokes eq. TODO: verschillende returns obv flag
+                                                             # loss_x en loss_y vangen in principe total_loss
+                bnc_loss = loss_bnc(case, predictions_bnc)  # Compare prediction to no-slip condition
+                data_loss = loss_data(case, predictions_data, solution_values)  # Compare prediction to data solution
+                
+                # EVO algorithm - lim parameter tunable
+                #batch_retain, total_loss_retain, loss_x_retain, loss_y_retain, loss_c_retain = evo(total_loss, loss_x, loss_y, loss_c, batch_locations, lim=0.6)
+                
+                # if epoch == 0: 
+                #     if batch_idx in batch_evo_0: 
+                #         Figures.evo_plot(Figures, case, run, ex_ID, epoch, batch_idx, boundary_locations, batch_locations, batch_retain, total_loss_retain, loss_x_retain, loss_y_retain, loss_c_retain, batch_retain_old)
+                #         Figures.velocity_prediction(Figures, case, ex_ID, geometry_locations, networks, epoch, run, batch_idx)
+                # elif epoch in grad_list:
+                #     if batch_idx in batch_evo: 
+                #         Figures.evo_plot(Figures, case, run, ex_ID, epoch, batch_idx, boundary_locations, batch_locations, batch_retain, total_loss_retain, loss_x_retain, loss_y_retain, loss_c_retain, batch_retain_old)
+                #         Figures.velocity_prediction(Figures, case, ex_ID, geometry_locations, networks, epoch, run, batch_idx)
+                # batch_retain_old = batch_retain    
+
+                # if epoch % epoch_save_NN == 0: 
+                #     if batch_idx == 0:
+                #         loss_wss(case, predictions_bnc, networks, xb, yb, *zb)
+                #         Figures.gradient_losses(Figures, case, ex_ID, epoch, epoch_pretrain, nr_layers, eqn_loss, bnc_loss, data_loss, networks)
+            
+
+                if epoch % epoch_learning_weight == 0 and len(loss_weight_list[0]) == epoch/epoch_learning_weight:
+                    loss_weight_list, lambda_bc, lambda_data, *gradients = weight_annealing_algorithm(networks, eqn_loss, bnc_loss, 
+                                                                                    data_loss, lambda_bc, lambda_data, 
+                                                                                    loss_weight_list, alpha)
+                    ns_values_list.append(ns_values_epoch.detach())
+                    if ex.observers:
+                        ex.log_scalar("training.loss_convU_ux" + str(run), ns_values_epoch[0].item(), epoch)
+                        ex.log_scalar("training.loss_convV_uy" + str(run), ns_values_epoch[1].item(), epoch)
+                        ex.log_scalar("training.loss_convU_vx" + str(run), ns_values_epoch[2].item(), epoch)
+                        ex.log_scalar("training.loss_convV_vy" + str(run), ns_values_epoch[3].item(), epoch)
+                        ex.log_scalar("training.loss_diffXu" + str(run), ns_values_epoch[4].item(), epoch)
+                        ex.log_scalar("training.loss_diffYu" + str(run), ns_values_epoch[5].item(), epoch)
+                        ex.log_scalar("training.loss_diffXv" + str(run), ns_values_epoch[6].item(), epoch)
+                        ex.log_scalar("training.loss_diffYv" + str(run), ns_values_epoch[7].item(), epoch)
+                        ex.log_scalar("training.loss_forceX" + str(run), ns_values_epoch[8].item(), epoch)
+                        ex.log_scalar("training.loss_forceY" + str(run), ns_values_epoch[9].item(), epoch)
+                        ex.log_scalar("training.loss_ux" + str(run), ns_values_epoch[10].item(), epoch)
+                        ex.log_scalar("training.loss_uy" + str(run), ns_values_epoch[11].item(), epoch)
+                    # if flag_grad_plot: 
+                        # Figures.gradient_distribution(Figures, case, gradients, epoch+epoch_pretrain, ex_ID, nr_layers)
+                
+                #ns_grads_list.append(grads)  # Out of Memory problem als elke grad wordt opgeslagen
+                loss = eqn_loss + lambda_bc * bnc_loss + lambda_data * data_loss
+                eqn_loss_tot += eqn_loss.detach() 
+                bnc_loss_tot += bnc_loss.detach()  # Detach to prevent storage of computation graph which leads to Out of Memory error.     
+                data_loss_tot += data_loss.detach()
+                n += 1
+
+                # Optimizer to determine direction of weight and bias update 
+                #loss.backward(retain_graph=True)  # Compute the gradients # TODO retain-graph geintroduceerd door evo
+                loss.backward()  # Compute the gradients # TODO retain-graph geintroduceerd door evo
+                               
+                optimizer_u.step()  # Update parameters 
+                optimizer_v.step()
+                optimizer_p.step()
+                if case.input_dimension == 3:
+                    optimizer_w.step()
+                
+                # End of batch - Verbose: 
+                if batch_idx % 40 == 0:
+                    print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss eqn {:.10f} Loss BC {:.8f} Loss data {:.8f}'.format(
+                        epoch, batch_idx * len(batch_locations[0]), len(dataloader.dataset),
+                            100. * batch_idx / len(dataloader), eqn_loss.item(), bnc_loss.item(), data_loss.item()))
+
+
+            #Figures.hist_batch_retain(Figures, case, ex_ID, epoch, run, batch_len, batchsize) #TODO uit voor 3D 
+            
+            # Scheduler follows learning rate adapting scheme as specified at beginning 
+            scheduler_u.step()
+            scheduler_v.step()
+            scheduler_p.step()
             if case.input_dimension == 3:
-                optimizer_w.step()
+                scheduler_w.step()
+            
+            eqn_loss_tot /= n
+            bnc_loss_tot /= n
+            data_loss_tot /= n
+            
+            # if epoch in vtk_list: 
+            #     print('writing vtk')
+            #     write_loss_vtk(case, total_loss, loss_c, loss_x, loss_y, loss_c_f, loss_x_f, loss_y_f, epoch)
 
-            # End of batch - Verbose: 
-            if batch_idx % 40 == 0:
-                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss eqn {:.10f} Loss BC {:.8f} Loss data {:.8f}'.format(
-                    epoch, batch_idx * len(x_in), len(dataloader.dataset),
-                           100. * batch_idx / len(dataloader), eqn_loss.item(), bnc_loss.item(), data_loss.item()))
+            # Store loss data every epoch_save_loss iteration, add to MongoDB server if observer is added (DEBUG=False)
+            if epoch % epoch_save_loss == 0:
+                loss_list[0].append(eqn_loss_tot.detach().item())
+                loss_list[1].append(bnc_loss_tot.detach().item())
+                loss_list[2].append(data_loss_tot.detach().item())
+                if ex.observers:  # check whether an observer is added to the run
+                    ex.log_scalar("training.eqn_loss" + str(run), eqn_loss_tot.detach().item(), epoch)
+                    ex.log_scalar("training.bnc_loss" + str(run), bnc_loss_tot.detach().item(), epoch)
+                    ex.log_scalar("training.data_loss" + str(run), data_loss_tot.detach().item(), epoch)
 
+            # # Save NNs and PINN performance plots every epoch_save_NN
+            if epoch % epoch_save_NN == 0:  
+                torch.save(net_u.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_u_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
+                torch.save(net_v.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_v_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
+                torch.save(net_p.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_p_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
+                if case.input_dimension == 3:
+                    torch.save(net_w.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_w_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
 
-        NSgrads_list.append(grads)
-        # NSterms_list.append(loss_terms)
+                if epoch != 0:  
+                    Figures.loss_plot(Figures, case, ex_ID, loss_list, epoch, epoch_pretrain, run)
+                    #Figures.ns_grad_values(Figures, case, ex_ID, epoch, epoch_pretrain, ns_grads_list)
+                Figures.velocity_prediction(Figures, case, ex_ID, geometry_locations, networks, epoch, run, batch_idx, show=False)
+                #Figures.velocity_prediction3D(Figures, case, ex_ID, geometry_locations, networks, epoch, run, batch_idx, show=True)
+                # Figures.data_error(Figures, case, ex_ID, boundary_locations, solution_locations, solution_values, networks, epoch, epoch_pretrain)
+                Figures.weight_factors_loss(Figures, case, ex_ID, epoch, epochs, loss_weight_list, run)
+                
+            # End of epoch - Verbose 
+            print('*****Total avg Loss : Loss eqn {:.10f} Loss BC {:.10f} Loss data {:.10f} ****'.format(eqn_loss_tot,
+                                                                                                        bnc_loss_tot,
+                                                                                                        data_loss_tot))
+            print('learning rate is ', optimizer_u.param_groups[0]['lr'], optimizer_v.param_groups[0]['lr'])
 
-        # Scheduler follows learning rate adapting scheme as specified at beginning 
-        scheduler_u.step()
-        scheduler_v.step()
-        scheduler_p.step()
+        toc = time.time()
+        elapseTime = toc - tic
+        print("elapse time in parallel = ", elapseTime)
+
+        
+        # Save the NNs 
+        torch.save(net_u.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_u_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
+        torch.save(net_v.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_v_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
+        torch.save(net_p.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_p_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
         if case.input_dimension == 3:
-            scheduler_w.step()
+            torch.save(net_w.state_dict(), case.path + "/" + str(run) + "/NNfiles/" + case.ID + "data_w_" + ex_ID + "_" + str(epoch) + "_" + str(run) + ".pt")
+
+        print("Data saved!")
         
-        eqn_loss_tot /= n
-        bnc_loss_tot /= n
-        data_loss_tot /= n
+        Figures.loss_plot(Figures, case, ex_ID, loss_list, epoch+1, epoch_pretrain, run)
+        # Figures.ns_grad_values(Figures, case, ex_ID, epoch, epoch_pretrain, ns_grads_list)
+        Figures.velocity_prediction(Figures, case, ex_ID, geometry_locations, networks, epoch, run, batch_idx, show=False)
+        # Figures.data_error(Figures, case, ex_ID, boundary_locations, solution_locations, solution_values, networks, epoch)
+        Figures.weight_factors_loss(Figures, case, ex_ID, epoch, epoch_pretrain, loss_weight_list, run)
         
-        # Store loss data every epoch_save_loss iteration, add to MongoDB server if observer is added (DEBUG=False)
-        if epoch % epoch_save_loss == 0:
-            loss_list[0].append(eqn_loss_tot.item())
-            loss_list[1].append(bnc_loss_tot.item())
-            loss_list[2].append(data_loss_tot.item())
-            if ex.observers:  # check whether an observer is added to the run
-                ex.log_scalar("training.eqn_loss", eqn_loss_tot.item(), epoch)
-                ex.log_scalar("training.bnc_loss", bnc_loss_tot.item(), epoch)
-                ex.log_scalar("training.data_loss", data_loss_tot.item(), epoch)
 
-        # # Save NNs and PINN performance plots every epoch_save_NN
-        if epoch % epoch_save_NN == 0:  
-            torch.save(net_u.state_dict(), case.path + "/NNfiles/" + case.ID + "data_u_" + ex_ID + ".pt")
-            torch.save(net_v.state_dict(), case.path + "/NNfiles/" + case.ID + "data_v_" + ex_ID + ".pt")
-            torch.save(net_p.state_dict(), case.path + "/NNfiles/" + case.ID + "data_p_" + ex_ID + ".pt")
-            if case.input_dimension == 3:
-                torch.save(net_w.state_dict(), case.path + "/NNfiles/" + case.ID + "data_w_" + ex_ID + ".pt")
-            
-        #     print('NN saved')
+        # Only contains creating VTK for now
+        # write_loss_vtk2(case, geometry_locations, networks, means_geo, stds_geo, epoch, ex_ID, run)  # TODO uitzoeken hoe niet 
+                                                                            # OOM te gaan door extra iteratie computation graph 
+     
+        # post(case, ex_ID, geometry_locations, networks, means_geo, stds_geo, output_filename, flag_compare)
+        print('jobs done!')
+    
 
-        #     steps = np.linspace(epoch_pretrain, epoch_pretrain + epoch, len(loss_weight_list[0]))
-        #     plt.figure(9)
-        #     for i in range(nr_losses - 1):
-        #         plt.plot(steps, loss_weight_list[i])
-        #     plt.xlabel('epochs')
-        #     # plt.ylabel('Loss')
-        #     # plt.yscale('log')
-        #     plt.legend(['lambda_bc', 'lambda_data'])
-        #     plt.title(case.name)
-        #     # plt.show()
-        #     plt.savefig(case.path + "/plots/" + case.ID + "learningWeight_plot_" + ex_ID + ".png")
-        #     plt.close(9)
-
-        #     # End of epoch - Verbose 
-        #     print('*****Total avg Loss : Loss eqn {:.10f} Loss BC {:.10f} Loss data {:.10f} ****'.format(eqn_loss_tot,
-        #                                                                                              bnc_loss_tot,
-        #                                                                                              data_loss_tot))
-        #     print('learning rate is ', optimizer_u.param_groups[0]['lr'], optimizer_v.param_groups[0]['lr'])
-
-
-            steps = np.linspace(epoch_pretrain, epoch_pretrain+epoch, len(loss_list[0]))
-            colors = ['b', 'g', 'r']
-            plt.figure(5)
-            for i in range(nr_losses):
-                plt.plot(steps, loss_list[i], colors[i])
-            plt.xlabel('epochs')
-            plt.ylabel('Loss')
-            plt.yscale('log')
-            plt.legend(['eq', 'bc', 'data'])
-            plt.title(case.name)
-            # plt.show()
-            plt.savefig(case.path + "/plots/" + case.ID + "loss_plot_" + ex_ID + ".png")
-            plt.close(5)
-
-            net_in = torch.cat((x_plot.requires_grad_(), y_plot.requires_grad_(), z_plot.requires_grad_()),
-                                1) if case.input_dimension == 3 else \
-                torch.cat((x_plot.requires_grad_(), y_plot.requires_grad_()), 1)
-            # net_in = torch.cat((x.requires_grad_(), y.requires_grad_()), 1)
-            output_u = net_u(net_in)  # evaluate model
-            output_v = net_v(net_in)  # evaluate model
-            output_u = output_u.cpu().data.numpy()  # need to convert to cpu before converting to numpy
-            output_v = output_v.cpu().data.numpy()
-
-            xd, yd, *zd = solution_locations
-
-            net_in_data = torch.cat((xd.requires_grad_(), yd.requires_grad_(), zd.requires_grad_()), 1) \
-                if case.input_dimension ==3 else torch.cat((xd.requires_grad_(), yd.requires_grad_()), 1)
-            output_ud = net_u(net_in_data)
-            output_vd = net_v(net_in_data)
-            output_ud = output_ud.cpu().data.numpy()  # need to convert to cpu before converting to numpy
-            output_vd = output_vd.cpu().data.numpy()
-
-            if case.input_dimension == 3:
-                output_w = net_w(net_in)
-                output_w = output_w.cpu().data.numpy()
-                output_wd = net_w(net_in_data)
-                output_wd = output_wd.cpu().data.numpy()
-
-            x_plot2 = x_plot.cpu()
-            y_plot2 = y_plot.cpu()
-            # z_plot2 = z_plot.cpu()
-            plt.figure(6)
-            plt.subplot(2, 1, 1)
-            plt.scatter(x_plot2.detach().numpy(), y_plot2.detach().numpy(), c=output_u, cmap='rainbow')
-            plt.title('NN results, u (top) & v (bot), - epoch' + str(epoch_pretrain + epoch))
-            plt.colorbar()
-            plt.subplot(2, 1, 2)
-            plt.scatter(x_plot2.detach().numpy(), y_plot2.detach().numpy(), c=output_v, cmap='rainbow')
-            plt.colorbar()
-            plt.savefig(case.path + "/plots/" + case.ID + "plotWU_" + ex_ID + "_" + str(epoch + epoch_pretrain)) if case.input_dimension == 3 \
-                else plt.savefig(case.path + "/plots/" + case.ID + "plotUV_" + ex_ID + "_" + str(epoch + epoch_pretrain))
-            plt.close(6)
-            # plt.show()
-
-            xd_plot2 = xd_plot.cpu()
-            yd_plot2 = yd_plot.cpu()
-            # zd_plot2 = zd_plot.cpu()
-            xb_plot2 = xb_plot.cpu()
-            yb_plot2 = yb_plot.cpu()
-            # zb_plot2 = zb_plot.cpu()
-            ud_plot2 = ud_plot.cpu().data.numpy()
-            vd_plot2 = vd_plot.cpu().data.numpy()
-            ud_diff = (output_ud - ud_plot2) / ud_plot2 * 100
-            vd_diff = (output_vd - vd_plot2) / vd_plot2 * 100
-            if case.input_dimension == 3:
-                wd_plot2 = wd_plot.cpu().data.numpy()
-                wd_diff = (output_wd - wd_plot2) / wd_plot2 * 100
-            # ud_diff_geo = (output_u / ud_geo)
-            # vd_diff_geo = (output_v / vd_geo)
-
-        # plt.figure(7)
-        # plt.subplot(2, 1, 1)
-        # plt.scatter(xb_plot2.detach().numpy(), yb_plot2.detach().numpy())
-        # plt.scatter(xd_plot2.detach().numpy(), yd_plot2.detach().numpy(), c=ud_diff, cmap='rainbow')
-        # plt.title('% error; ud (top) & vd (bot), - epoch' + str(epoch_pretrain + epoch))
-        # plt.colorbar()
-        # plt.subplot(2, 1, 2)
-        # plt.scatter(xb_plot2.detach().numpy(), yb_plot2.detach().numpy())
-        # plt.scatter(xd_plot2.detach().numpy(), yd_plot2.detach().numpy(), c=vd_diff, cmap='rainbow')
-        # plt.colorbar()
-        # plt.savefig(case.path + "/plots/" + case.ID + "plotD_UV_" + ex_ID + "_" + str(epoch + epoch_pretrain))
-        # plt.close(7)
-        # plt.show()
-
-        # plt.figure(8)
-        # plt.subplot(2, 1, 1)
-        # plt.scatter(xb_plot2.detach().numpy(), yb_plot2.detach().numpy())
-        # plt.scatter(x_plot2.detach().numpy(), y_plot2.detach().numpy(), c=ud_diff_geo, cmap='rainbow')
-        # plt.title('% error; ud (top) & vd (bot), - epoch' + str(epoch_pretrain + epoch))
-        # plt.colorbar()
-        # plt.subplot(2, 1, 2)
-        # plt.scatter(xb_plot2.detach().numpy(), yb_plot2.detach().numpy())
-        # plt.scatter(x_plot2.detach().numpy(), y_plot2.detach().numpy(), c=vd_diff_geo, cmap='rainbow')
-        # plt.colorbar()
-        # plt.savefig(case.path + "/plots/" + case.ID + "plotD_UV_geo_" + ex_ID + "_" + str(epoch + epoch_pretrain))
-        # plt.close(8)
-        # # plt.show()
-
-
-            steps = np.linspace(epoch_pretrain, epoch_pretrain + epoch, len(loss_weight_list[0]))
-            plt.figure(9)
-            for i in range(nr_losses - 1):
-                plt.plot(steps, loss_weight_list[i])
-            plt.xlabel('epochs')
-            # plt.ylabel('Loss')
-            # plt.yscale('log')
-            plt.legend(['lambda_bc', 'lambda_data'])
-            plt.title(case.name)
-            # plt.show()
-            plt.savefig(case.path + "/plots/" + case.ID + "learningWeight_plot_" + ex_ID + ".png")
-            plt.close(9)
-
-    toc = time.time()
-    elapseTime = toc - tic
-    print("elapse time in parallel = ", elapseTime)
-
-    # Save the NNs 
-    torch.save(net_u.state_dict(), case.path + "/NNfiles/" + case.ID + "data_u_" + ex_ID + ".pt")
-    torch.save(net_v.state_dict(), case.path + "/NNfiles/" + case.ID + "data_v_" + ex_ID + ".pt")
-    torch.save(net_p.state_dict(), case.path + "/NNfiles/" + case.ID + "data_p_" + ex_ID + ".pt")
-    if case.input_dimension == 3:
-        torch.save(net_w.state_dict(), case.path + "/NNfiles/" + case.ID + "data_w_" + ex_ID + ".pt")
-
-    print("Data saved!")
-    epochs = epoch + epoch_pretrain  
-
-    # # steps = np.linspace(0, epoch - epoch_save_loss.np.int(np.divide(epoch, epoch_save_loss)))
-    # steps = np.linspace(epoch_pretrain, epoch_pretrain+epochs - epoch_save_loss, np.int(np.divide(epochs, epoch_save_loss)))
-    steps = np.linspace(epoch_pretrain, epoch_pretrain+epochs - epoch_save_loss, len(loss_list[0]))
-    colors = ['b', 'g', 'r']
-    plt.figure(10)
-    for i in range(nr_losses):
-        plt.plot(steps, loss_list[i], colors[i])
-    plt.xlabel('epochs')
-    plt.ylabel('Loss')
-    plt.yscale('log')
-    plt.legend(['eq', 'bc', 'data'])
-    plt.title(case.name)
-    # plt.show()
-    plt.savefig(case.path + "/plots/" + case.ID + "loss_plot_" + ex_ID + ".png")
-
-
-    print('jobs done!')
 ex.run()
 
+#write_loss_vtk2(case, geometry_locations, networks, means_geo, stds_geo, epoch, ex_ID, run)
 
 
 

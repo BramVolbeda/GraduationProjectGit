@@ -1,7 +1,22 @@
+from matplotlib.pyplot import flag
 import numpy as np
 import vtk
 from vtkmodules.util.numpy_support import vtk_to_numpy
 import os
+import torch
+import pyDOE2
+
+def create_dir(case, run):
+    ml_name = case.name
+    observer_path = './results/' + ml_name + '/' + str(run) + '/'
+    # configure local observer
+    if not os.path.exists(observer_path):
+        os.mkdir(observer_path)
+        os.mkdir(observer_path + "/NNfiles")
+        os.mkdir(observer_path + "/plots")
+        os.mkdir(observer_path + "/outputs")
+    return
+
 
 def file_reader(file, mesh, **extremes):
     """
@@ -169,3 +184,154 @@ def data_reader(case, random_flag=False, **extremes):
     solution_values = [velocity / case.U_scale for velocity in solution_values]
 
     return solution_locations, solution_values
+
+def file_reader_v2(file, seed, nr_runs, mesh=True, flag_lhs=False):
+    """
+    Function that takes in a *.vtk/*.vtu file and extracts the coordinates. 
+    Outputs minima and maxima for equal scaling between data files.  
+    
+    Parameters:
+    file (*.vtk/*.vtu) : The file containing either the mesh or the boundary coordinates. 
+    mesh (Boolean) : If the file is of type .*vtu (mesh) or *.vtk (boundary). 
+    **extremes (kwargs) : Minima and maxima lists from previous function call. Defined as min and max. 
+
+    Returns: 
+    vector_norm (list) : Coordinates normalized between [-1, 1], for x (index 0), y (index 1) and z (index 2). 
+    minima (list) : Minumum values for x (index 0), y (index 1) and z (index 2). 
+    maxima (list) : Maximum values for x (index 0), y (index 1) and z (index 2). 
+    """
+    print('Loading', file)  # TODO f string format 
+    reader = vtk.vtkXMLUnstructuredGridReader() if mesh else vtk.vtkUnstructuredGridReader() # Set up the reader type 
+    # reader = vtk.vtkXMLUnstructuredGridReader() if mesh else vtk.vtkPolyDataReader() # Set up the reader type 
+    # elif input_n == 3:
+    #     reader = vtk.vtkPolyDataReader()
+    reader.SetFileName(file) 
+    reader.Update() 
+    data_vtk = reader.GetOutput()
+    n_points = data_vtk.GetNumberOfPoints() 
+    print('n_points of the mesh:', n_points)
+
+    x = np.zeros((n_points, 1))
+    y = np.zeros((n_points, 1))
+    z = np.zeros((n_points, 1))
+    
+    VTKpoints = vtk.vtkPoints()
+
+    for i in range(n_points):   # Read the contents of the file
+        pt_iso = data_vtk.GetPoint(i)
+        x[i] = '%.4f'%(pt_iso[0])  # Expressed in 4 decimals, avoid close to 0 truncation errors
+        y[i] = '%.4f'%(pt_iso[1])
+        z[i] = '%.4f'%(pt_iso[2])
+        VTKpoints.InsertPoint(i, pt_iso[0], pt_iso[1], pt_iso[2]) 
+
+    point_data = vtk.vtkUnstructuredGrid() 
+    point_data.SetPoints(VTKpoints) 
+
+    if flag_lhs: 
+        lhs = pyDOE2.lhs(2, int(n_points/nr_runs), random_state=seed, criterion='m') if not np.any(z) else pyDOE2.lhs(3, int(n_points/nr_runs), random_state=seed, criterion='corr')
+        x = np.asarray([round((np.max(x) - np.min(x)) * lhs[i, 0] + np.min(x), 2) for i in range(int(n_points/nr_runs))])  
+        y = np.asarray([round((np.max(y) - np.min(y)) * lhs[i, 1] + np.min(y), 2) for i in range(int(n_points/nr_runs))])  
+        z = np.asarray([round((np.max(z) - np.min(z)) * lhs[i, 2] + np.min(z), 2) for i in range(int(n_points/nr_runs))]) if np.any(z) else np.zeros(int(n_points/nr_runs)) 
+
+    # Setting up the location vector, division error if Z only contains zeros
+    location_vector = [x, y, z] if np.any(z) else [x, y]
+    loc_vec_reshape = [vector.reshape((np.size(vector[:]), 1)) for vector in location_vector]
+    loc_vec_transpose = [vector.reshape(-1, 1) for vector in loc_vec_reshape]
+
+    # Applying 0-mean normalization to the input data 
+    means = [vector.mean() for vector in loc_vec_transpose] 
+    stds = [vector.std() for vector in loc_vec_transpose]
+        
+    return loc_vec_transpose, means, stds
+
+
+def data_reader_v2(case, geometry_locations, nr_data, seed, flag_random=False, flag_exact=False, flag_lhs=False):
+    """
+    Function that takes in the solution file (*.vtu) and extracts the velocity values at prespecified
+    or random locations. 
+
+    Parameters: 
+    case (Class) : Corresponds to the class that contains information on the solution file used and the data
+                    point locations
+    random_flag (Boolean) : If set to True, the user is required to specify the amount of data points that will
+                            be randomly sampled within the domain. If set to False, the pre-specified points will
+                            be used as described in the case information. 
+    **extremes (kwargs) : Minima and maxima lists from previous function call. Defined as min and max. 
+
+    Returns: 
+    solution_locations (list) : List of lists corresponding to the coordinates of the data points. 
+                                Index 0 is x, index 1 is y, index 2 is z.  
+    solution_values (list) : List of lists corresponding to the values of the data points. 
+                                Index 0 is u, index 1 is v, index 2 is w. 
+
+    """
+
+    if flag_lhs:
+        x, y, *z = geometry_locations
+        lhs = pyDOE2.lhs(2, nr_data, random_state=seed, criterion='m') if not z else pyDOE2.lhs(3, nr_data, random_state=seed, criterion='corr')
+        x_data = np.asarray([round((np.max(x) - np.min(x)) * lhs[i, 0] + np.min(x), 2) for i in range(nr_data)])  
+        y_data = np.asarray([round((np.max(y) - np.min(y)) * lhs[i, 1] + np.min(y), 2) for i in range(nr_data)])  
+        z_data = np.asarray([round((np.max(z) - np.min(z)) * lhs[i, 2] + np.min(z), 2) for i in range(nr_data)]) if z else np.zeros(nr_data)   
+    else: 
+        x_data = np.asarray(case.x_data) 
+        y_data = np.asarray(case.y_data) 
+        z_data = np.asarray(case.z_data)
+    
+    #data_locations = [x_data, y_data, z_data] if np.any(z_data) else [x_data, y_data]
+    data_locations = [x_data, y_data, z_data]
+    print('Loading', case.vel_file) 
+
+    reader = vtk.vtkXMLUnstructuredGridReader()  # Set up reader
+    # reader = vtk.vtkUnstructuredGridReader()  # Set up reader
+    reader.SetFileName(case.vel_file)
+    reader.Update()
+    data_vtk = reader.GetOutput()
+    n_points = data_vtk.GetNumberOfPoints() 
+    print('n_points of the data file read:', n_points)
+
+    if flag_random:  
+        sample_idx = int(n_points / nr_data) + 1 
+        print('Sampling', nr_data, 'points from a total of', n_points, 'points')
+        x_vtk_mesh = np.zeros((n_points, 1))
+        y_vtk_mesh = np.zeros((n_points, 1))
+        z_vtk_mesh = np.zeros((n_points, 1))
+
+        location_vector = [x_vtk_mesh, y_vtk_mesh, z_vtk_mesh] if np.any(z_vtk_mesh) else [x_vtk_mesh, y_vtk_mesh]
+        #location_vector = [x_vtk_mesh, y_vtk_mesh, z_vtk_mesh] 
+        VTKpoints = vtk.vtkPoints()
+        N_pts_data = 0
+        for i in range(n_points-1):
+            if i % sample_idx == 0:
+                pt_iso = data_vtk.GetPoint(i)
+                x_vtk_mesh[N_pts_data] = pt_iso[0]
+                y_vtk_mesh[N_pts_data] = pt_iso[1]
+                z_vtk_mesh[N_pts_data] = pt_iso[2]
+                N_pts_data += 1 
+        data_locations = [mesh[0:N_pts_data, 0] for mesh in location_vector]
+
+    VTKpoints = vtk.vtkPoints()
+    for i in range(len(data_locations[0])): 
+        VTKpoints.InsertPoint(i, [axis[i] for axis in data_locations]) 
+
+    point_data = vtk.vtkUnstructuredGrid()
+    point_data.SetPoints(VTKpoints)
+
+    probe = vtk.vtkProbeFilter()  # Sample data from specific locations
+    probe.SetInputData(point_data)
+    probe.SetSourceData(data_vtk)
+    probe.Update()
+    array = probe.GetOutput().GetPointData().GetArray(case.fieldname) 
+    data_vel = vtk_to_numpy(array) 
+
+    data_locations = [data_locations[0], data_locations[1], data_locations[2]] if np.any(z_data) else [data_locations[0], data_locations[1]]
+    # Setting up the location vector, division error if Z only contains zeros
+    sv_reshape = [vector.reshape((np.size(vector[:]), 1)) for vector in data_locations]
+    solution_locations = [vector.reshape(-1, 1) for vector in sv_reshape]
+    solution_values = [data_vel[:,i]/case.U_scale for i in range(len(data_locations))] 
+
+    if flag_exact:  # for 2D 
+        a = case.L_scale / 2 
+        solution_values[0] = [round(case.vmax * (1 - (y_data[i] - case.center)**2/ ( a**2)), 3) for i in range(len(y_data))]
+        solution_values[1][:] = 0.
+    return solution_locations, solution_values
+
